@@ -1,0 +1,291 @@
+device: cuda:0
+output_directory: run_dir_rasterM
+log_file: train.log
+print_timings: True
+
+training:
+
+  dspath:  ./spice2ECP_mbis_bonds_dataset_shards
+
+  batch_size: 128
+  max_epochs: 2200
+  nbatch_per_epoch: 1000
+  nbatch_per_validation: 50
+  default_loss_type: mse
+
+  energy_terms: [nn_energies_mean, repulsion]
+  print_stages_params: True
+
+  ema_decay: 0.99
+  metrics_ema_decay: 0.9
+
+  gpu_preprocessing: True
+  nblist_add_atoms: 200
+  nblist_mult_size: 1.2
+  nblist_add_neigh: 10
+
+  random_rotation: False
+
+  coordinates_ref_key: coordinates_ref
+  padder_add_sys: 20
+
+  weight_decay: 1.e-3
+  decay_targets: [
+      ".*/kernel",
+      ".*/bias",
+      ".*/weights",
+      ".*SpeciesEncoding.*",
+      "species_encoding",
+      "embedding/Wa.*",
+    ]
+
+
+  zero_nans: True
+  restore_scaling: 0.95
+
+  optimizer: adabelief
+  init_lr: 2.e-4
+  lr: 2.e-4
+  final_lr: 1.e-7
+  onecycle_epochs: 2000
+  peak_epoch: 500
+
+
+  metric_best: mae_smooth_tot
+
+  loss:
+    e:
+      key: etot_ensemble
+      ref: shifted_energy
+      weight: 20
+      energy_unit: kcalpermol
+      threshold: 10.
+      type: ensemble_crps
+      ensemble_axis: -1
+
+    ebis:
+      key: etot_ensemble_bis
+      ref: shifted_energy
+      weight: 20.
+      energy_unit: kcalpermol
+      threshold: 10.
+      type: ensemble_crps
+      ensemble_axis: -1
+
+    i:
+      key: etot_ensemble
+      ref: internal_energy
+      remove_ref_sys: True
+      weight: 10.
+      energy_unit: kcalpermol
+      threshold: 10.
+      type: ensemble_crps
+      ensemble_axis: -1
+    
+    ibis:
+      key: etot_ensemble_bis
+      ref: internal_energy
+      remove_ref_sys: True
+      weight: 10.
+      energy_unit: kcalpermol
+      threshold: 10.
+      type: ensemble_crps
+      ensemble_axis: -1
+    
+    m:
+      key: etot_ensemble
+      ref: interaction_energy
+      remove_ref_sys: True
+      weight: 10.
+      energy_unit: kcalpermol
+      threshold: 10.
+      type: ensemble_crps
+      ensemble_axis: -1
+    
+    mbis:
+      key: etot_ensemble_bis
+      ref: interaction_energy
+      remove_ref_sys: True
+      weight: 10.
+      energy_unit: kcalpermol
+      threshold: 10.
+      type: ensemble_crps
+      ensemble_axis: -1
+
+    f:
+      key: forces
+      ref: forces
+      weight: 1000.
+      energy_unit: kcalpermol
+      threshold: 1.5
+
+
+    v:
+      key: virial_tensor
+      ref: virial_tensor
+      weight: 100.
+      energy_unit: kcalpermol
+      threshold: 1.5
+      type: log_cosh
+      nat_pow: 0.5
+
+
+model: 
+  cutoff: 7.5
+  energy_unit: ev
+  preprocessing:
+    graph:
+      switch_params:
+        switch_type: hard
+    graph_embed:
+      module_name: GRAPH_FILTER
+      cutoff: 3.5
+      graph_key: graph_embed
+      parent_graph: graph
+      remove_hydrogens: False
+      switch_params:
+        switch_type: polynomial
+        p: 8.
+        trainable: True
+    block_indexer:
+      module_name: BLOCK_INDEXER
+      output_key: block_index
+      split_CNOPSSe: True
+
+  modules:
+    species_encoding:
+      module_name: species_encoding
+      encoding: electronic_structure
+      zmax: 86
+      trainable: False
+
+    species_embedding:
+      module_name: NEURAL_NET
+      neurons: [256,  &dim 176]
+      activation: &act swish
+      use_bias: True
+      input_key: species_encoding
+
+    static_charges:
+      module_name: charge_hypothesis
+      embedding_key: species_embedding
+      total_charge_key: total_charge
+      ncharges: &nc 32
+      mode: qeq
+
+
+    concat_charge:
+      module_name: concatenate
+      keys: [species_encoding, static_charges] 
+      output_key: species_encoding
+
+    charge_embedding:
+      module_name: NEURAL_NET
+      neurons: [256, *dim]
+      activation: *act
+      input_key: species_encoding
+      output_key: species_embedding
+
+    embedding:
+      module_name: RASTER
+      dim: *dim
+      lmax: 3
+      scal_heads: 16
+      tens_heads: 4
+      att_dim: 16
+      nlayers: 2
+      att_activation: swish
+      activation: swish
+      update_hidden: [352,*dim]
+      radial_basis:
+        dim: 10
+        basis: bessel
+        trainable: False
+      species_encoding: species_embedding
+      embedding_key: embedding
+      graph_key: graph_embed
+      graph_lode: graph
+      lmax_lode: 2
+      lode_rshort: 1.75
+      lode_dshort: 1.75
+      lode_extra_powers: [6,8,10]
+      block_index_key: block_index
+      lode_channels: 4
+      ignore_parity: False
+
+    ################################
+    ## NN ENERGY (shallow ensemble)
+
+    nn_energies:
+      module_name: BLOCK_INDEX_NET
+      output_dim: 64
+      hidden_neurons: [*dim, *dim]
+      block_index_key: block_index
+      activation: *act
+      use_bias: True
+      input_key: embedding
+      squeeze: True
+
+    nn_energies_stat:
+      module_name: ensemble_stat
+      key: nn_energies
+
+    nn_energies_bis:
+      module_name: BLOCK_INDEX_NET
+      output_dim: 64
+      hidden_neurons: [*dim, *dim]
+      block_index_key: block_index
+      activation: *act
+      use_bias: True
+      input_key: embedding
+      squeeze: True
+
+    ################################
+    # REPULSION ENERGY
+
+    repulsion:
+      module_name: repulsion_nlh
+      graph_key: graph_embed
+
+    ################################
+    # SUM CONTRIBUTIONS
+
+    reshape_repulsion:
+      module_name: reshape
+      key: repulsion
+      shape: [-1, 1]
+
+    sum_contributions:
+      module_name: add
+      keys: [nn_energies, repulsion]
+      output_key: energies
+
+    sum_contributions_bis:
+      module_name: add
+      keys: [nn_energies_bis, repulsion]
+      output_key: energies_bis
+
+    energies_bis_stat:
+      module_name: ensemble_stat
+      key: energies_bis
+
+    ################################
+    # SUM TO SYSTEM ENERGY
+
+    etot_ensemble:
+      module_name: scatter_system
+      key: energies
+      output_key: etot_ensemble
+
+    etot_stat:
+      module_name: ensemble_stat
+      key: etot_ensemble
+
+    etot_ensemble_bis:
+      module_name: scatter_system
+      key: energies_bis
+      output_key: etot_ensemble_bis
+
+    etot_stat_bis:
+      module_name: ensemble_stat
+      key: etot_ensemble_bis
